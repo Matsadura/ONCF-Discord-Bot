@@ -3,12 +3,16 @@ from typing import List, Dict, Any
 from datetime import datetime
 
 from core.models import Journey, Transfer, Fare
+from core.stations import get_station_name_by_code
 
 logger = logging.getLogger("oncf_bot.services.parser")
 
 def parse_duration(duration_str: str) -> int:
-    """Parses duration string like '01h30' into minutes."""
+    """Parses duration string like '01h30' or '05:31:00' into minutes."""
     try:
+        if ':' in duration_str:
+            parts = duration_str.split(':')
+            return int(parts[0]) * 60 + int(parts[1])
         parts = duration_str.split('h')
         if len(parts) == 2:
             return int(parts[0]) * 60 + int(parts[1] or 0)
@@ -25,75 +29,86 @@ def parse_availability_response(data: dict) -> List[Journey]:
     if not data or not data.get("body"):
         return journeys
         
-    for item in data["body"]:
+    body = data["body"]
+    items = body.get("departurePath", [])
+    if not items:
+        # Fallback if structure is a direct list
+        if isinstance(body, list):
+            items = body
+        else:
+            return journeys
+        
+    for item in items:
         try:
-            # Fallback if structure varies
-            dep_station = item.get("gareDepart", "Unknown")
-            arr_station = item.get("gareArrivee", "Unknown")
-            dep_time_raw = item.get("dateDepart", "") # Format: YYYY-MM-DDTHH:MM:SS
-            arr_time_raw = item.get("dateArrivee", "")
+            dep_code = item.get("codeGareDepart", item.get("gareDepart", "Unknown"))
+            arr_code = item.get("codeGareArrivee", item.get("gareArrivee", "Unknown"))
+            
+            dep_station = get_station_name_by_code(str(dep_code))
+            arr_station = get_station_name_by_code(str(arr_code))
+            
+            dep_time_raw = item.get("dateTimeDepart", item.get("dateDepart", ""))
+            arr_time_raw = item.get("dateTimeArrivee", item.get("dateArrivee", ""))
             
             dep_time = dep_time_raw.split("T")[1][:5] if "T" in dep_time_raw else dep_time_raw
             arr_time = arr_time_raw.split("T")[1][:5] if "T" in arr_time_raw else arr_time_raw
             
-            duration = item.get("duree", "00h00")
+            duration = item.get("durationTrajet", item.get("duree", "00h00"))
             duration_minutes = parse_duration(duration)
             
-            # Extract prices. The structure often has "prix" or we extract it from first segment
             fares = Fare()
             min_price = float('inf')
             
-            # In typical ONCF availability body, price info can be in 'voyageurs' or root 'prix'
-            # Let's inspect 'voyageurs' first, assuming simple 1 passenger
-            voyageurs = item.get("voyageurs", [])
-            for voy in voyageurs:
-                for tarif in voy.get("tarifs", []):
-                    code = tarif.get("codeClasse") # e.g., '1' or '2'
-                    price_val = tarif.get("prix", 0.0)
+            list_prix = item.get("listPrixFlexibilite", [])
+            for flex in list_prix:
+                for prix_obj in flex.get("prixFlexibilite", []):
+                    price_val = prix_obj.get("prix")
+                    is_sup = prix_obj.get("sup", False)
                     if price_val:
                         price = float(price_val)
-                        if code == '1' or code == 1:
-                            fares.first_class_price = price
-                        elif code == '2' or code == 2:
-                            fares.second_class_price = price
+                        if is_sup:
+                            if not fares.first_class_price or price < fares.first_class_price:
+                                fares.first_class_price = price
+                        else:
+                            if not fares.second_class_price or price < fares.second_class_price:
+                                fares.second_class_price = price
                         
                         if price < min_price:
                             min_price = price
 
-            # Fallback to root 'prix' if the above doesn't exist
-            if not fares.first_class_price and not fares.second_class_price:
-                 for p in item.get("prix", []):
-                    classe = p.get("classe")
-                    val = p.get("montant")
-                    if val:
-                        price = float(val)
-                        if classe == 1:
-                            fares.first_class_price = price
-                        elif classe == 2:
-                            fares.second_class_price = price
-                        if price < min_price:
-                            min_price = price
+            # Fallback for old/alternative payload structure
+            if not list_prix:
+                voyageurs = item.get("voyageurs", [])
+                for voy in voyageurs:
+                    for tarif in voy.get("tarifs", []):
+                        code = tarif.get("codeClasse")
+                        price_val = tarif.get("prix", 0.0)
+                        if price_val:
+                            price = float(price_val)
+                            if code == '1' or code == 1:
+                                fares.first_class_price = price
+                            elif code == '2' or code == 2:
+                                fares.second_class_price = price
+                            if price < min_price:
+                                min_price = price
 
-            # Train segments and Transfers
+            segments = item.get("listSegments", item.get("segments", []))
+            train_nums = " ➔ ".join([str(seg.get("numeroCommercial", seg.get("numeroTrain", ""))) for seg in segments])
+            
             transfers = []
-            segments = item.get("segments", [])
-            
-            # e.g., "700 ➔ 608"
-            train_nums = " ➔ ".join([str(seg.get("numeroTrain", "")) for seg in segments])
-            
             if len(segments) > 1:
                 for i in range(len(segments) - 1):
                     current_seg = segments[i]
                     next_seg = segments[i+1]
                     
-                    transfer_station = current_seg.get("gareArrivee", "Transfer")
-                    arr_at_transfer = current_seg.get("dateArrivee", "").split("T")[-1][:5]
-                    dep_from_transfer = next_seg.get("dateDepart", "").split("T")[-1][:5]
+                    transfer_code = current_seg.get("codeGareArrivee", current_seg.get("gareArrivee", "Transfer"))
+                    transfer_station = get_station_name_by_code(str(transfer_code))
                     
-                    # Calculate layover roughly in minutes
+                    arr_at_transfer = current_seg.get("dateHeureArrivee", current_seg.get("dateArrivee", "")).split("T")[-1][:5]
+                    dep_from_transfer = next_seg.get("dateHeureDepart", next_seg.get("dateDepart", "")).split("T")[-1][:5]
+                    
                     try:
-                        arr_dt = datetime.fromisoformat(current_seg.get("dateArrivee"))
-                        dep_dt = datetime.fromisoformat(next_seg.get("dateDepart"))
+                        arr_dt = datetime.fromisoformat(current_seg.get("dateHeureArrivee", current_seg.get("dateArrivee")))
+                        dep_dt = datetime.fromisoformat(next_seg.get("dateHeureDepart", next_seg.get("dateDepart")))
                         layover_minutes = int((dep_dt - arr_dt).total_seconds() / 60)
                     except Exception:
                         layover_minutes = 0

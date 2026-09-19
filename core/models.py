@@ -16,12 +16,21 @@ class AvailabilityRequest(BaseModel):
     codeGareArrivee: str
     codeNiveauConfort: int = 2
     dateDepartAller: str
-    isTarifReduit: bool = False
+    dateDepartAllerMax: Optional[str] = None
+    dateDepartRetour: Optional[str] = None
+    dateDepartRetourMax: Optional[str] = None
+    isTrainDirect: Optional[bool] = None
+    isPreviousTrainAller: Optional[bool] = None
+    isTarifReduit: bool = True
     adulte: int = 1
     kids: int = 0
     listVoyageur: List[PassengerInfo]
     booking: bool = True
+    isEntreprise: bool = False
     token: str = ""
+    numeroContract: str = ""
+    codeTiers: str = ""
+    iTravel: bool = False
     isActive: bool = False
 
 class Transfer(BaseModel):

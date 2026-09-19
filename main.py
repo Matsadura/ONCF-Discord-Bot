@@ -18,10 +18,6 @@ class ONCFBot(commands.Bot):
     async def setup_hook(self):
         # Load cogs here
         await self.load_extension("cogs.train")
-        await self.load_extension("cogs.auth")
-        
-        from core.groups import train_group
-        self.tree.add_command(train_group)
         
         # Sync slash commands
         logger.info("Syncing commands...")
