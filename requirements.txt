@@ -1,0 +1,6 @@
+discord.py>=2.3.2
+aiohttp>=3.9.5
+python-dotenv>=1.0.1
+pydantic>=2.7.1
+thefuzz>=0.22.1
+python-Levenshtein>=0.25.1
